@@ -1,0 +1,7 @@
+Una vez conectado a VPN:
+
+Host name/address: 172.16.1.214
+Port: 5432
+Maintenance database: bici
+Username: bici
+Password: 6di2NseuN9r8
