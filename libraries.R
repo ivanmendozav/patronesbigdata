@@ -6,7 +6,7 @@ connect_pgsql <- function(database="bici2023"){
   rm(pw) # removes the password
   return(con_m)
 }
-
+ 
 getData <- function(limit=100000){
   require("RPostgreSQL")
   con_t <- connect_pgsql("bici2023")
@@ -64,6 +64,28 @@ segmentTrips <- function(subdata, minttime=300, maxtime=3600){
   allusertrips$ttime <- as.numeric(allusertrips$endtime-allusertrips$starttime)
   allusertrips %>% filter(ttime>=minttime & ttime<=maxtime) ->allusertrips
   return(allusertrips)
+}
+
+labelHomes <- function(tripdata){
+  #home travels are approx 25% of total travels
+  users <- unique(tripdata$user) #list of unique users
+  newtripdata <- data.frame()
+  for (ui in users){
+    usertrips <- tripdata[tripdata$user == ui,]
+    clust <- dbscan(data.frame(x=usertrips$dx, y=usertrips$dy),eps = 100,minPts = round(nrow(t)*0.25))
+    usertrips$cluster <- clust$cluster
+    usertrips %>% filter(hour>18) -> t
+    if (length(unique(clust$cluster))>1 & nrow(t)>1){
+      clust <- as.data.frame(table(t$cluster))
+      clust <- clust[clust$Var1!="0",]
+      clust <- clust[order(clust$Freq,decreasing = T),]
+      home <- as.numeric(clust[1,]$Var1)
+      usertrips$home <- ifelse(usertrips$cluster == home, "Y","N")
+    }else{usertrips$home <-"N"}
+    usertrips$cluster <- NULL  
+    newtripdata <- rbind(newtripdata,usertrips)
+  }
+  return(newtripdata)
 }
 
 #label travel mode

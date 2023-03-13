@@ -2,6 +2,10 @@
 library(dplyr)
 library(lubridate)
 library(tictoc)
+library(dbscan)
+library(rgdal)
+library(OpenStreetMap)
+library(ggplot2)
 source("libraries.R")
 
 tic()
@@ -9,7 +13,7 @@ tic()
 data <- getData(limit=1000000) #call once
 data %>% filter(accuracy<1000 & activity_type!="unknown") %>% select(device_model,event,battery_level,is_moving,speed,heading,activity_type,recorded_at,latitude,longitude,company_token) ->subdata
 save(subdata,file="subdata.R")
-load(file="subdata.R") #800000 datos
+#load(file="subdata.R") #800000 datos
 
 #2. Track points stats
 glimpse(subdata)
@@ -26,11 +30,12 @@ tripdata <- segmentTrips(datapoints, minttime = 600, maxtime = 3600) #get trips 
 tripdata$date <- ymd_hms(tripdata$starttime) 
 tripdata$wday <- wday(tripdata$date)
 tripdata$hour <- hour(tripdata$date)
+tripdata <- labelHomes(tripdata)
 save(tripdata,file="tripdata.R")
 prop.table(table(tripdata$wday))
 
 #stats for week day trips
-tripdata %>% filter(wday == 6 & hour>20) -> tripdata
+tripdata %>% filter(wday == 6 & hour>20 & home=="N") -> tripdata
 tripdata %>% filter(mode %in% c("on_bicycle","in_vehicle","walking")) -> tripdata
 hist(tripdata$ttime)
 table(tripdata$mode)
@@ -51,7 +56,7 @@ toc()
 #1142.73 sec con 800000 datos
 
 #5. Especificar atractores para una hora en particular
-tripdata %>% filter(hour == 7) -> hourlytrips
+tripdata %>% filter(hour == 21) -> hourlytrips
 centroids %>% filter(cluster %in% as.numeric(unique(hourlytrips$cluster))) -> hourlycentroids
 plotmap(minlon,maxlon,minlat,maxlat,hourlycentroids,"+init=epsg:4326")
 #Descartar domicilios
