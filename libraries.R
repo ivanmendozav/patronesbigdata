@@ -72,7 +72,8 @@ labelHomes <- function(tripdata){
   newtripdata <- data.frame()
   for (ui in users){
     usertrips <- tripdata[tripdata$user == ui,]
-    clust <- dbscan(data.frame(x=usertrips$dx, y=usertrips$dy),eps = 100,minPts = round(nrow(t)*0.25))
+    print(ui)
+    clust <- dbscan(data.frame(x=usertrips$dx, y=usertrips$dy),eps = 100,minPts = round(nrow(usertrips)*0.25))
     usertrips$cluster <- clust$cluster
     usertrips %>% filter(hour>18) -> t
     if (length(unique(clust$cluster))>1 & nrow(t)>1){

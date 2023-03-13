@@ -43,7 +43,7 @@ boxplot(ttime ~ mode, tripdata)
 hist(tripdata$tdistance)
 boxplot(tdistance ~ mode, tripdata)
 tripdata$x = tripdata$dx; tripdata$y = tripdata$dy; 
-plotmap(minlon,maxlon,minlat,maxlat,tripdata[sample(1:nrow(tripdata),10000),],"+init=epsg:31992")
+plotmap(minlon,maxlon,minlat,maxlat,tripdata[sample(1:nrow(tripdata),100),],"+init=epsg:31992")
 
 #4. Encontrar zonas densas del mapa de calor
 #load(file="pois.R")
