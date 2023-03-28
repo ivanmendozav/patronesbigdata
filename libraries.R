@@ -10,7 +10,7 @@ connect_pgsql <- function(database="bici2023"){
 getData <- function(limit=100000){
   require("RPostgreSQL")
   con_t <- connect_pgsql("bici2023")
-  query <- paste("select * from locations where recorded_at between '2019-10-01' and '2019-12-01' limit ",limit, sep="")
+  query <- paste("select * from locations where recorded_at between '2019-10-01' and '2019-12-01' order by random() limit ",limit, sep="")
   df <- dbGetQuery(con_t, query)
   dbDisconnect(con_t)
   return(df)
@@ -113,12 +113,12 @@ changecoordsystem <- function(tripdata, longlabel="dlong", latlabel="dlat", sour
 getAttractors <- function(tripdata, eps=25, minPts=10){
   library(dplyr)
   library(dbscan)
+  library(sqldf)
   clust <- dbscan(data.frame(x=tripdata$dx, y=tripdata$dy),eps = eps,minPts = minPts)
-  tripdata$cluster<-factor(clust$cluster)
-  tripdata %>% filter(cluster!="0") %>% group_by(cluster) %>% summarise(points=n(),centroid_x = mean(dx),centroid_y = mean(dy)) -> centroids
-  centroids <- as.data.frame(centroids)
-  print(centroids)
+  tripdata$cluster<-as.integer(clust$cluster)
+  centroids <- sqldf("select cluster,count(distinct(user)) users,count(*) trips,avg(dx) centroid_x,avg(dy) centroid_y from tripdata where cluster<>0 group by cluster order by cluster limit 10",dbname = "bici2023")
   wgscent <- changecoordsystem(centroids,longlabel = "centroid_x", latlabel = "centroid_y", sourceproj = "+init=epsg:31992",  targetproj="+init=epsg:4326")
+  colnames(wgscent) <- c("cluster","users","trips","x","y","long","lat")
   return (list(tripdata, wgscent))
 }
 
