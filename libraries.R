@@ -7,81 +7,124 @@ connect_pgsql <- function(database="bici2023"){
   return(con_m)
 }
  
-getData <- function(limit=100000){
+getData <- function(limit=10000, users=5){
   require("RPostgreSQL")
   con_t <- connect_pgsql("bici2023")
-  query <- paste("select * from locations where recorded_at between '2019-10-01' and '2019-12-01' order by random() limit ",limit, sep="")
+  query <- paste("SELECT distinct(company_token) user,count(company_token) datos FROM locations where (recorded_at between '2019-10-01' and '2019-12-01') group by (company_token) order by datos desc limit ",users, sep="")
+  df <- dbGetQuery(con_t, query)
+  users <- paste(paste0("'", df$user,"'"),collapse = ",")
+  
+  query <- paste("select accuracy,activity_type,device_model,event,battery_level,is_moving,speed,heading,recorded_at,latitude,longitude,company_token from locations where (recorded_at between '2019-10-01' and '2019-12-01') and company_token IN (",users,") order by recorded_at limit ",limit, sep="")
   df <- dbGetQuery(con_t, query)
   dbDisconnect(con_t)
   return(df)
 }
 
-segmentTrips <- function(subdata, minttime=300, maxtime=3600){
+segmentTrips <- function(subdata){
   library(lubridate)
   library(dplyr)
-  sumdistance <- 0
+  
   #preprocessing
   subdata$activity_type <- factor(subdata$activity_type)
   subdata$device_model <- factor(subdata$device_model)
-  subdata$event <- factor(subdata$event)
   subdata$is_moving <- factor(subdata$is_moving)
   subdata$date <- lubridate::ymd_hms(subdata$recorded_at)
   #segmentation
-  movingpoints <- data.frame() #each trips points
+  
   allusertrips <- data.frame() #data frame to return
   users <- unique(subdata$company_token) #list of unique users
   for (user in users){ #for each user
     id <- 1
-    subdata %>% filter(company_token==user ) -> userpoints #user points
-    if (nrow(userpoints %>% filter(activity_type=="still"))>0){ #if stops are found
-      next_origin = userpoints[1,] #first origin is first point
-      for (pointindex in 1:nrow(userpoints)){ #for each data point
+    subdata %>% filter(company_token==user ) %>% drop_na() -> userpoints #user points
+    userpoints <- userpoints[order(userpoints$date),] #sort trips by datetime
+    print(paste(user,":",nrow(userpoints)))
+    if (nrow(userpoints)>1 & nrow(userpoints %>% filter(activity_type=="still"))>0){ #if stops are found
+      movingpoints <- data.frame() #each trips points
+      sumdistance <- 0
+      next_origin = userpoints[1,] #first point is first origin
+      for (pointindex in 2:nrow(userpoints)){ #for each data point
         point <- userpoints[pointindex,]
+        if(nrow(movingpoints)>1){
+          last_point <- tail(movingpoints,1)
+          distance <- sqrt((point$x-last_point$x)^2+(point$y-last_point$y)^2)
+          sumdistance <- sumdistance + distance
+        }
         if (point$activity_type!="still"){ #merge moving points
-          if(nrow(movingpoints)>1){
-            last_point <- tail(movingpoints,1)
-            distance <- sqrt((point$x-last_point$x)^2+(point$y-last_point$y)^2)
-            sumdistance <- sumdistance + distance
-          }  
           movingpoints <- rbind(movingpoints,point)
         } else{ #when stop add to all trips array
-          if(nrow(movingpoints)>1){ #only if there are enough points (At least origin and destination)
+          #if(nrow(movingpoints)>1){ #only if there are enough points (At least origin and destination)
             #create trip object
-            distance <- sqrt((point$x-last_point$x)^2+(point$y-last_point$y)^2)
-            sumdistance <- sumdistance + distance
-            trip <- data.frame(user=user, tripid = id, ox=next_origin$x, oy=next_origin$y, dx=point$x, dy=point$y, olong=next_origin$longitude, olat=next_origin$latitude, dlong=point$longitud, dlat=point$latitude, starttime=head(movingpoints,1)$recorded_at, endtime=tail(movingpoints,1)$recorded_at, mode=labelmode(movingpoints), points=nrow(movingpoints), tdistance=sumdistance)
+            #distance <- sqrt((point$x-last_point$x)^2+(point$y-last_point$y)^2)
+            #sumdistance <- sumdistance + distance
+          if(nrow(movingpoints)>1){
+            trip <- data.frame(user=user, tripid = id, ox=next_origin$x, oy=next_origin$y, dx=point$x, dy=point$y, olong=next_origin$longitude, olat=next_origin$latitude, dlong=point$longitud, dlat=point$latitude, starttime=next_origin$recorded_at, endtime=last_point$recorded_at, mode=labelmode(movingpoints), points=nrow(movingpoints), tdistance=sumdistance)
             allusertrips <- rbind(allusertrips,trip)
-            movingpoints <- data.frame() #new trip
-            sumdistance <- 0
             id <- id + 1 #new trip id
-            next_origin = point #next origin is previous destination
           }
+          movingpoints <- data.frame() #new trip
+          sumdistance <- 0
+          next_origin = point #next origin is previous destination
+          #}
         }
       }
     }
   }
   #postprocessing
-  allusertrips$ttime <- as.numeric(allusertrips$endtime-allusertrips$starttime)
-  allusertrips %>% filter(ttime>=minttime & ttime<=maxtime) ->allusertrips
+  allusertrips$ttime <- as.numeric(as.POSIXct(allusertrips$endtime))-as.numeric(as.POSIXct(allusertrips$starttime))
+  #allusertrips %>% filter(ttime>=minttime & ttime<=maxtime) ->allusertrips
   return(allusertrips)
 }
 
-labelHomes <- function(tripdata){
+populateStayTime <- function(data){
+  #populate stay time
+  alltrips <- data
+  arrivalseconds <- as.numeric(as.POSIXct(alltrips$endtime))
+  departureseconds <- as.numeric(as.POSIXct(alltrips$starttime))
+  alltrips$departureseconds <- departureseconds
+  alltrips$arrivalseconds <- arrivalseconds
+  alltrips$stayindestination <- 0
+  
+  users <- unique(alltrips$user) #list of unique users
+  newtripdata <- data.frame()
+  for (u in users){
+    alltrips %>% filter(user==u ) -> usertrips
+    usertrips <- usertrips[order(usertrips$date),] 
+    for (i in 1:(nrow(usertrips)-1)){
+      usertrips[i,]$stayindestination <-usertrips[i+1,]$departureseconds - usertrips[i,]$arrivalseconds 
+    }
+    newtripdata <- rbind(newtripdata,usertrips)
+  }
+  return(newtripdata)
+}
+
+labelHomes <- function(tripdata, fromhour=20, minstay=3600){
   #home travels are approx 25% of total travels
   users <- unique(tripdata$user) #list of unique users
   newtripdata <- data.frame()
   for (ui in users){
     usertrips <- tripdata[tripdata$user == ui,]
-    print(ui)
-    clust <- dbscan(data.frame(x=usertrips$dx, y=usertrips$dy),eps = 100,minPts = round(nrow(usertrips)*0.25))
+    usertrips$dtrips <- 0
+    usertrips$home <- "N"
+    #print(ui)
+    clust <- dbscan(data.frame(x=usertrips$dx , y=usertrips$dy),eps = 50,minPts = 2)
     usertrips$cluster <- clust$cluster
-    usertrips %>% filter(hour>18) -> t
-    if (length(unique(clust$cluster))>1 & nrow(t)>1){
-      clust <- as.data.frame(table(t$cluster))
-      clust <- clust[clust$Var1!="0",]
+    
+    # add trips number to destination
+    dclust <- as.data.frame(table(usertrips$cluster))
+    for (ucluster in dclust$Var1){
+      dtrips <- as.numeric(dclust[dclust$Var1==ucluster,]$Freq)
+      usertrips[usertrips$cluster == ucluster,]$dtrips = dtrips
+    }
+    
+    #focus on night trips for home
+    usertrips %>% filter(hour>fromhour & stayindestination>minstay & dtrips>1) -> t
+      if (length(unique(clust$cluster))>1 & nrow(t)>0){
+      dclust <- as.data.frame(table(t$cluster))
+      clust <- dclust[dclust$Var1!="0",]
       clust <- clust[order(clust$Freq,decreasing = T),]
       home <- as.numeric(clust[1,]$Var1)
       usertrips$home <- ifelse(usertrips$cluster == home, "Y","N")
+      
     }else{usertrips$home <-"N"}
     usertrips$cluster <- NULL  
     newtripdata <- rbind(newtripdata,usertrips)
