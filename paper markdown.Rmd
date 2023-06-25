@@ -1,0 +1,264 @@
+---
+title: "Paper Methodology"
+author: "Ivan Mendoza Vázquez / Gustavo Álvarez Coello / Andrés Baquero Larriva"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = F, message = F, comment = "",error = F)
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(tictoc)
+library(dbscan)
+library(rgdal)
+library(OpenStreetMap)
+library(ggplot2)
+library(gridExtra)
+library(sqldf)
+library(descriptr)
+library(digest)
+source("libraries.R")
+```
+# Home Detection Methodology
+
+The Resulting locations of the student homes have to be mined from mobility data after these are processed following a multi-step procedure. The required steps are summarized through the flow chart found in \ref{fig1}, then a deeper explanation follows in the next sections. 
+
+![Multi-step procedure methodology for Big Data Home Detection \label{fig1}](paper/images/Methodology Home Detection.jpeg)
+
+In a few words, data are collected by a mobile app which uses the Global Positioning System (GPS) sensors of the mobile device, so that they can be stored in a remote server via an Application Programming Interface (API). Then, these unprocessed data are cleaned to filter out outliers and transformed to a suitable formaat for further calculations. At last, origins and destinations (OD) are detected by some segmentation algorithm and later classified as potential home locations. Some potential transport services after acquiring this information are planned out to complete the flow.
+
+## Mobile Data Collection
+
+The first step, assuming a mobile app exists so that it can collect GPS data, is storing mobility data together with temporal and identity information in a remote database. Each observation *i* (a labeled spatiotemporal data point) will have the following structure:
+
+$$ p_i = (x_i, y_i, t_i) $$
+that is, in its simplest form, it consists on the location's coordinates $(x,y)$ of the tracked user at a specific time *t*. A more complete version of the observation is:
+
+$$ p_i  = (uid_i, lat_i, lon_i, alt_i, date_i, t_i, dow_i, acc_i, timestamp_i) $$
+
+* *uid*, is a user's unique identifier, normally a MD5 hash string which guarantees data is collected anonymously, but it still makes possible to know the user in the database. 
+
+* *lat. lon, alt*, the point's latitude, longitude and altitude coordinates.
+
+* *date*, a day-month-year string
+
+* *t*, a 24-hour local time format for a continuous variable after applying this formula:
+
+$$ t  =  hours + \frac{minutes}{60} + \frac{seconds}{3600}$$
+
+* *dow*, the day of the week the observation was captured, where 1 is Sunday  
+
+* *acc*, accuracy in meters of the measurement as reported by the sensor API, lower values produce more accurate measurements.
+
+* *timestamp*, A Unix based time stamp, allowing to treat dates as continuous variables. 
+
+The set $P_a$ of data point observations collected in real-time by a user's mobile device, is stored in this format in a remote server for further off-line procedures. However, this format is not yet suitable for most calculations, so that further processing is required as described in the next steps.
+
+## Data Processing
+
+In order to avoid bias in the calculation of travel destinations, outliers are removed considering position accuracy and temporal constraints. A subset $P_a$ consists of more refined "valid" observations, selected through the following criteria.
+
+$$ P_b  =  \{p_i\in P_a | acc_i< \alpha \}$$
+where $\alpha$ is a parameter that denotes the maximum allowed accuracy error in meters. Moreover, users can travel to destinations found in other regions, countries and even continents. For the purpose of this research, home locations must be found inside a study region at a medium-sized city level, so a bounding box defined by $[lon_{min}, lon_{max}, lat_{min}, lat_{max}]$ constraints the valid observation previously found.
+
+$$ P_c  =  \{p_i\in P_b | (lat_{min}<lat_i<lat_{max}) \wedge   (lon_{min}<lon_i<lon_{max}) \}$$
+Because this research is intended to provide insights about transport services for students in a College Community, a time period where users are expected to regularly visit the campus must be selected. Then, a cutoff date defined by $[date_{min}, date_{max}]$ is used to select the final subset $P$.   
+
+$$ P  =  \{p_i\in P_c | (date_{min}<date_i<date_{max}) \}$$
+
+At last, since OD detection requires computation of distances, a Cartesian projection is a better approach. For the selected study region the UTM-17S is chosen, so that longitude, latitude and altitude measures are transformed to euclidean space coordinates $(x,y,z)$. Since dates and accuracies are not needed anymore, each observation $p_i$ in the resulting processed set $P$ becomes:
+
+$$ p_i  = (uid_i, x_i, y_i, z_i, t_i, dow_i) $$
+
+### Dataset Description
+
+The full dataset used in this study consists of spatiotemporal data, collected by a dedicated tracking mobile app for a College Community. It involves data from *728* users during one moth period, namely from May 20 to June 20, 2023. The results of the further analysis have proven 30 days of mobility data per user to be sufficient to identify home locations. The number of observations after the data cleaning process is above *11 million*, so that good infrastructure of the cloud storage is required to handle this volume of big data.
+
+A sample from the spatiotemporal dataset is presented below for the five attributes mentioned earlier:
+
+```{r}
+data <- read.csv("newdatasample.csv")
+data <- data[5:nrow(data),]
+data$user <- substr(sapply(data$company_token, digest, algo="md5"),1,10)
+data$date <- lubridate::ymd_hms(data$recorded_at)
+datapoints <- changecoordsystem(data,longlabel = "longitude", latlabel = "latitude", targetproj = "+init=epsg:31992" )
+datapoints$dow <- wday(datapoints$date)
+datapoints$timestamp <- as.numeric(datapoints$date)
+datapoints$ymd <- format(ymd_hms(datapoints$date),'%Y-%m-%d')
+datapoints$hour <- round(hour(datapoints$date) + 
+  minute(datapoints$date)/60 + second(datapoints$date)/3600,5) #decimal hour
+subset <- datapoints %>% select(user,x,y,altitude,hour,dow,timestamp)
+colnames(subset) <- c("uid","x","y","z","t","dow","timestamp")
+knitr::kable(head(subset,10),format = "latex",align = "c",caption = "Sample observations from the Spatiotemporal Dataset")
+```
+The bounding box for the region of Cuenca, Ecuador contains longitudes between -79,084789233 and -78,933588295, and latitudes between -2,938030323 and -2,865347073. A picture of the sample of collected points on a map at scale 1:50000 is given in \ref{fig2}, where it is shown that complete travel trajectories can be retrieved from data. The sampling frecuency of the GPS, that is the time difference between measures was not fixed but around 2 seconds on average.
+
+![Sample of collected points for the region of Cuenca, Ecuador. \label{fig2}](paper/images/mapa.jpeg)
+
+### Computing new attributes
+
+Some additional features must be added to the existing dataset so that travel behavior can be evaluated.
+
+Let $p_i$ be the $i^{th}$ observation in a spatiotemporal dataset $P$. Then, the cumulative distance $D_{a,n}$ for a trajectory starting at point $a$ and consisting of the next $n$ observations is defined as:
+
+$$ D_{a,n}=\sum_{i=a+1}^{a+n}d_{i, i-1} $$
+where $d_{i,j}$ is the euclidean distance between two observations.
+
+$$ d_{i,j}=((x_i-x_{j})^2+(y_i-y_{j})^2)^{1/2} $$
+
+that is, the sum of distances between proximate points; then, instant speed at observation $i^{th}$ is computed by:
+
+$$ s_{i} = \frac{d_{i,i-1}}{t_{i}-t_{i-1}} $$
+The resulting extended dataset has the following structure after making the mentioned computations, and then filtering out consecutive measures taken at the same time stamp (possibly duplicates); also the very first observation has to be removed in order to avoid division by zero in the speed calculation. Distances have been transformed to *km* so that speed unit is *km/h*. 
+
+```{r}
+datapoints <- subset %>% filter(uid=="614820f9e6")
+datapoints <- transform(datapoints,Lag_x=lag(x,n = 1,default = 0))
+datapoints <- transform(datapoints,Lag_y=lag(y,n = 1,default = 0))
+datapoints <- transform(datapoints,Lag_t=lag(timestamp,n = 1,default = 0))
+datapoints$distance <- sqrt((datapoints$Lag_x-datapoints$x)^2 + (datapoints$Lag_y-datapoints$y)^2)/1000
+datapoints$dt <- (datapoints$timestamp - datapoints$Lag_t)/3600
+datapoints$speed <- datapoints$distance/datapoints$dt
+datapoints <- datapoints[datapoints$dt>0,]
+datapoints <- datapoints[2:nrow(datapoints),]
+datapoints <- datapoints[datapoints$speed<130,]
+subsetone <-  datapoints %>% select(-c(Lag_x,Lag_y,Lag_t))
+knitr::kable(head(subsetone,10),format = "latex",align = "c",caption = "Sample observations from the Spatiotemporal Dataset")
+```
+Finally, a last filtering procedure removes observations with extreme speeds, as values beyond *130km/h* are very improbable (by checking speed limits within the studied region). These data are often related to extreme distances between proximate points, which can occur due to GPS bad measures.  
+
+## Data Mining
+
+Data traces of each user must be segmented into individual travels (geometries) so than OD's can be found at the start and end points. In order to aggregate data into trajectories, an heuristic considering low-speed hot spots as destinations is now described.
+
+Taken a single day displacements for a single user, the speeds and distances between proximate points variations that take place when traveling, staying on destination, changing to a different travel mode may allow to detect a trip's endpoints. The speed and distance distributions are shown in \@ref(fig:speed-plot).
+
+```{r speed-plot, fig.cap="(left) Speed and (right) Distance distribution histograms for a single day and user."}
+row.names(subsetone)<-NULL
+subsetoneday <- subsetone[5:529,] #one day 30may2023
+write.csv(subsetoneday,"pointspaper.csv")
+g1 <- ggplot(subsetoneday, aes(x=speed)) + geom_histogram() 
+g2 <- ggplot(subsetoneday, aes(x=distance)) + geom_histogram() 
+grid.arrange(g1,g2,ncol=2)
+```
+As seen in the previous figure, most of the speeds and distances are closer to zero, probably because users spend most of their time walking or staying in one place before starting the next trip. The changes in speed during the day can be seen in \@ref(fig:speed-hour-plot).
+
+```{r speed-hour-plot, fig.cap="Speed variations along a single day."}
+ggplot(subsetoneday, aes(x=t, y=speed))+geom_line()+ylab("Speed (km/h)")+xlab("Time of the day (hours)")
+```
+
+This means that, data points can be segmented into individual travels by detecting those locations when moving at very low speeds (staying still), with respect to a given speed tolerance $\epsilon$. 
+
+It can be assumed that actual destinations are found in intervals where users are not moving for a minimum amount of time $t_{min}$, that is in the "valleys" shown in last figure; in contrast to traffic lights that will also produce zero speeds but will last only a few seconds. The following plot allows appreciating points merged into trips (clusters) for $\epsilon$=1km/h and $t_{min}$= 12 minutes  \@ref(fig:speed-hour2-plot). Increasing $t_{min}$ will merge nearby trips into larger ones
+
+
+```{r}
+library(dbscan)
+tmin <- 0.05
+subsetoneday %>% select(timestamp) %>% scale() ->dataframe
+clusters <- dbscan(dataframe,eps = tmin, minPts = 2)
+subsetoneday$tripid <- factor(clusters$cluster)
+```
+
+```{r speed-hour2-plot, fig.cap="Speed variations along a single day."}
+ggplot()+geom_point(data=subsetoneday,aes(x=t,y = speed,color = tripid))+ylab("Speed (km/h)")+xlab("Time of the day (hours)")
+```
+
+At last, the fist (oldest) and last (newest) point in each cluster indicate the origin and destination, as well as the departure and arrival times (from the time stamps of these points). The travel time is simply the difference between the arrival and departure times; also, the cumulative distance of all points in a cluster indicates the trip travel distance. The following table gives a glimpse of the aggregate date into individual travels.
+
+
+```{r}
+library(sqldf)
+subsetoneday$id <- 1:nrow(subsetoneday)
+query <- "select t.uid,t.tripid,min(t.id) oid,max(t.id) did,sum(t.distance) distance from subsetoneday as t group by t.uid,t.tripid order by t.uid,t.tripid"
+trippoints <- sqldf(query)
+subsetoneday %>% filter(id %in% c(trippoints$oid)) -> origins
+subsetoneday %>% filter(id %in% c(trippoints$did)) -> destinations
+trips <- data.frame(trippoints$uid, trippoints$tripid, origins$x, origins$y, origins$z, origins$t, destinations$x, destinations$y, destinations$z, destinations$t, trippoints$distance, destinations$timestamp-origins$timestamp)
+colnames(trips) <- c("uid","tripid","ox","oy","dz","departure","dx","dy","dz","arrival","tdistance","ttime")
+tripsglimpse <- trips %>% select(uid,tripid,ox,oy,dx,dy,departure,arrival,tdistance)
+knitr::kable(head(tripsglimpse,10),format = "latex",align = "c",caption = "Sample trips for one single user and day")
+write.csv(trips,"destinationspaper.csv")
+```
+
+The resulting segmentation allows OD's to be detected. Their coordinates are given in the table as attributes "dx" and "dy" for destinations locations, and "ox" and "oy" for the origins. Figure \ref{fig3} presents on a map at scale 1:25000 the resulting user's destinations (as red spots). It can be noticed that as locations are repeatedly visited, some points could be merged into a single destination as possibly they are short displacements around the same location; this can be done by density-based clustering techniques; however this is not necessary for the upcoming analysis.
+
+![Sample destinations for one single user and day. \label{fig3}](paper/images/destinos.jpeg)
+
+By applying the algorithm to the full dataset of tracked users, segmented trajectories exhibit the statistics shown in figure \ref{fig:trips-plot}.
+
+```{r trips-plot, fig.cap="Trip statistics for the full dataset."}
+
+tmin <- 0.04
+populated <- data.frame()
+for (uid in unique(subset$uid)){
+  subsetone <- subset[subset$uid==uid,]
+  subsetone <- transform(subsetone,Lag_x=lag(x,n = 1,default = 0))
+  subsetone <- transform(subsetone,Lag_y=lag(y,n = 1,default = 0))
+  subsetone <- transform(subsetone,Lag_t=lag(timestamp,n = 1,default = 0))
+  subsetone$distance <- sqrt((subsetone$Lag_x-subsetone$x)^2 + (subsetone$Lag_y-subsetone$y)^2)/1000
+  subsetone$dt <- (subsetone$timestamp - subsetone$Lag_t)/3600
+  subsetone$speed <- subsetone$distance/subsetone$dt
+  subsetone <- subsetone[subsetone$dt>0,]
+  subsetone <- subsetone[subsetone$speed<130,]
+  subsetone <-  subsetone %>% select(-c(Lag_x,Lag_y,Lag_t))
+  subsetone <- subsetone[2:nrow(subsetone),]
+  subsetone %>% select(timestamp) %>% scale() ->dataframe
+  clusters <- dbscan(dataframe,eps = tmin, minPts = 2)
+  subsetone$tripid <- factor(clusters$cluster)
+  populated <- rbind(populated,subsetone)
+}
+populated$id <- 1:nrow(populated)
+query <- "select t.uid,t.tripid,min(t.id) oid,max(t.id) did,sum(t.distance) distance from populated as t group by t.uid,t.tripid order by t.uid,t.tripid"
+trippoints <- sqldf(query)
+
+populated %>% filter(id %in% c(trippoints$oid)) -> origins
+populated %>% filter(id %in% c(trippoints$did)) -> destinations
+trips <- data.frame(trippoints$uid, trippoints$tripid, origins$x, origins$y, origins$z, origins$t, destinations$x, destinations$y, destinations$z, destinations$t, trippoints$distance, (destinations$timestamp-origins$timestamp)/3600, origins$dow, destinations$timestamp)
+colnames(trips) <- c("uid","tripid","ox","oy","oz","departure","dx","dy","dz","arrival","tdistance","ttime","dow","timestamp")
+
+p1 <- ggplot(trips, aes(x=dow)) + geom_histogram()
+p2 <- ggplot(trips, aes(x=ttime)) + geom_histogram() 
+p3 <- ggplot(trips, aes(x=tdistance)) + geom_histogram() 
+grid.arrange(p1,p2,p3,ncol=3)
+```
+### Home Detection
+
+After destinations have been detected, another heuristic can be used to identify a user's home. Another concepts must be first defined.
+
+Let $T_k$ be a trip displacement identified by $k$, the following characteristics are known:
+
+$$T_k=(o_k, d_k, dt_k, at_k, st_k)$$
+
+* *$o_i$*, the origin data point with its own coordinates and time stamp
+
+* *$d_i$*, the destination data point with its own coordinates and time stamp
+
+* *$dt_i$*, the departure time (time at origin data point)
+
+* *$at_i$*, the arrival time (time at destination data point)
+
+* *$st_i$*, stay time at destination of this trip
+
+$$ st_i =  dt_{i+1} - at_i$$
+
+That is, the stay time is the time spent on destination before the next trip starts. A first exploratory data analysis must be carried out with users who have voluntarily provided an approximation of the location of their residence. Some statistics of these destinations regarding the trips involved are presented in .
+
+```{r homes-plot, fig.cap="Trip statistics for the full dataset."}
+alltrips <- populateStayTime2(trips)
+alltrips <- labelHomes2(alltrips)
+alltrips %>% filter(home=="Y") -> hometrips
+
+p1 <- ggplot(hometrips, aes(x=departure)) + geom_histogram()
+p2 <- ggplot(hometrips, aes(x=arrival)) + geom_histogram() 
+p3 <- ggplot(hometrips, aes(x=stayindestination)) + geom_histogram() 
+grid.arrange(p1,p2,p3,ncol=3)
+```
+
+
+
+
+
+

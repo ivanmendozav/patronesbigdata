@@ -1,0 +1,160 @@
+---
+title: Procesamiento y minería de datos espacio temporales para la toma de decisiones
+  de políticas de movilidad
+author: "Ivan Mendoza Vázquez / Gustavo Álvarez Coello / Andrés Baquero Larriva"
+date: "`r Sys.Date()`"
+output: slidy_presentation
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = F, message = F, comment = "",error = F)
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(tictoc)
+library(dbscan)
+library(rgdal)
+library(OpenStreetMap)
+library(ggplot2)
+library(gridExtra)
+library(sqldf)
+library(digest)
+source("libraries.R")
+
+```
+
+## Introducción
+
+Datos espacio temporales: puntos con información sobre ubicación + tiempo de muestra
+
+$$ p^\rightarrow_i = (x, y, t) $$
+En el contexto de un sensor GPS (dispositivos móviles):
+
+$$ p^\rightarrow_i  = (lat, lon, alt, datetime) $$
+En nuestro dataset estos puntos para un mismo usuario se ven así:
+```{r} 
+data <- getDataByRemoteUser(limit=1000000,userid = "galvarezmci",deviceid = "M2101K9AG-12")
+data2 <- getRemoteData(users=10)
+data <-rbind(data,data2)
+#data <- read.csv("10newuserspoints.csv")
+#data$altitude <- runif(nrow(data),2400,2500)
+data$user <- substr(sapply(data$company_token, digest, algo="md5"),1,10)
+subdata <- data %>% select(recorded_at,latitude,longitude,altitude,user)
+(head(subdata,5))
+```
+
+## Procesamiento de Datos
+
+Para trabajar con geometrías por usuario y analizarlas con respecto a *t*:
+
+$$ p^\rightarrow_i  = (u, x, y, z, dow, hour) $$
+
+```{r}
+data$date <- lubridate::ymd_hms(data$recorded_at)
+datapoints <- changecoordsystem(data,longlabel = "longitude", latlabel = "latitude", targetproj = "+init=epsg:31992" )
+datapoints$dow <- wday(datapoints$date)
+datapoints$ymd <- format(ymd_hms(datapoints$date),'%Y-%m-%d')
+datapoints$hour <- round(hour(datapoints$date) + 
+  minute(datapoints$date)/60 + second(datapoints$date)/3600,5) #decimal hour
+datapoints$z <- datapoints$altitude
+subset <- datapoints %>% select(user,x,y,z,dow,hour,ymd)
+head(subset,5)
+```
+* x,y,z UTM 17S *Epsg:31992*
+* Day of the week (dow) *1: Domingo*
+* hour: variable continua
+* Importante conservar anonimato
+
+## Preprocesamiento de Datos (continuación)
+
+```{r}
+minlat <- min(datapoints[1:min(10000,nrow(datapoints)),]$latitude); 
+maxlat <- max(datapoints[1:min(10000,nrow(datapoints)),]$latitude); 
+minlon <- min(datapoints[1:min(10000,nrow(datapoints)),]$longitude); 
+maxlon <- max(datapoints[1:min(10000,nrow(datapoints)),]$longitude);
+plotmap(minlon,maxlon,minlat,maxlat,datapoints[1:min(10000,nrow(datapoints)),],"+init=epsg:31992")
+
+```
+* Recorrido de un solo usuario en el historial.
+
+## Agregación de Datos
+```{r}
+allusertrips <- datapoints #fsacotoM2104K10AC-13, galvarezmciM2101K9AG-12
+datapoints <- datapoints %>% filter(company_token=="galvarezmciM2101K9AG-12")
+datapoints <- transform(datapoints,Lag_x=c(x[-1],NA))
+datapoints <- transform(datapoints,Lag_y=c(y[-1],NA))
+datapoints <- transform(datapoints,Lag_hour=c(hour[-1],NA))
+datapoints$distance <- sqrt((datapoints$Lag_x-datapoints$x)^2 + (datapoints$Lag_y-datapoints$y)^2)/1000
+datapoints$dt <- datapoints$Lag_hour - datapoints$hour
+datapoints <- datapoints[datapoints$distance>0 & datapoints$dt>0,]
+datapoints$speed <- datapoints$distance/datapoints$dt
+subset <-  datapoints %>% select(x,y,hour,distance,dt,speed)
+head(subset,5)
+```
+
+```{r}
+oneday <- 	datapoints[datapoints$ymd=='2023-06-20',]
+ggplot(oneday, aes(x=hour, y=speed))+geom_line()
+```
+
+
+## Segmentación de Viajes
+Puntos son agregados en viajes con sus propias características:
+```{r}
+alltrips <- segmentTrips2(allusertrips) 
+```
+
+
+```{r}
+alltrips <- alltrips[alltrips$tdistance>100 &  alltrips$ttime<3600,]
+alltrips$date <- ymd_hms(alltrips$starttime) 
+alltrips$adate <- ymd_hms(alltrips$endtime) 
+alltrips$dow <- wday(alltrips$date)
+alltrips$hour <- hour(alltrips$endtime) #arrival hour
+alltrips$day <- format(ymd_hms(alltrips$adate),'%Y-%m-%d')
+alltrips <- populateStayTime(alltrips)
+alltrips <- labelHomes2(alltrips)
+subset <- alltrips %>% select(starttime, endtime, tdistance, ttime, olat,olong, dlat, dlong)
+
+head(subset,5)
+```
+
+```{r}
+p1 <- ggplot(alltrips, aes(x=dow)) + geom_histogram()
+p2 <- ggplot(alltrips, aes(y=ttime)) + geom_boxplot() 
+p3 <- ggplot(alltrips, aes(y=tdistance)) + geom_boxplot() 
+grid.arrange(p1,p2,p3,ncol=3)
+```
+
+## Segmentación de Viajes (ODs)
+Ubicación de orígenes y destinos bajo cierto criterio.
+
+```{r}
+minlat <- min(alltrips$dlat); 
+maxlat <- max(alltrips$dlat); 
+minlon <- min(alltrips$dlong); 
+maxlon <- max(alltrips$dlong);
+tripdata = data.frame(x =alltrips$dx, y=alltrips$dy)
+plotmap(minlon,maxlon,minlat,maxlat,tripdata,"+init=epsg:31992")
+```
+
+## Segmentación de Viajes (Hogares)
+Destino más frecuente en el historial del último viaje de cada día.
+
+```{r}
+alltrips %>% filter(home=="Y", user=="galvarezmciM2101K9AG-12") -> hometrips
+tripdata = data.frame(x =hometrips$dx, y=hometrips$dy)
+plotmap(-79.0426,-78.9408,-2.9269,-2.8762,tripdata,"+init=epsg:31992")
+```
+
+## Segmentación de Viajes (Puntos de interés)
+Destinos frecuentes con mínimo de visitas y/o visitantes.
+
+```{r}
+alltrips %>% filter(home=="N",dtrips>17) -> nohometrips
+nohometrips %>% filter(dlong>=-79.0426,dlong<=-78.9408,dlat>=-2.9269,dlat<=-2.8762) -> nohometrips
+tripdata = data.frame(x =nohometrips$dx, y=nohometrips$dy)
+plotmap(-79.0426,-78.9408,-2.9269,-2.8762,tripdata,"+init=epsg:31992")
+```
+
+* Mínimo de visitas: 4
