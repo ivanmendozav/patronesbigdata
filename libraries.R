@@ -218,6 +218,60 @@ segmentTrips3 <- function(fsubdata, epsilon){
 }
 
 
+addSpeeds <- function(set){
+  datapoints <- set
+  datapoints <- transform(datapoints,Lag_x=lag(x,n = 1,default = 0))
+  datapoints <- transform(datapoints,Lag_y=lag(y,n = 1,default = 0))
+  datapoints <- transform(datapoints,Lag_t=lag(timestamp,n = 1,default = 0))
+  datapoints$distance <- sqrt((datapoints$Lag_x-datapoints$x)^2 + (datapoints$Lag_y-datapoints$y)^2)/1000
+  datapoints$dt <- (datapoints$timestamp - datapoints$Lag_t)/3600
+  datapoints$speed <- datapoints$distance/datapoints$dt
+  datapoints <- datapoints[datapoints$dt>0,]
+  datapoints <- datapoints[2:nrow(datapoints),]
+  datapoints <- datapoints[datapoints$speed<130,]
+  datapoints %>% select(-c(Lag_x,Lag_y,Lag_t)) -> datapoints
+  datapoints <- datapoints[2:nrow(datapoints),]
+  return  (datapoints)
+}
+
+
+#time-based
+segmentTrips4 <- function(datapoints, tmin=0.05, vmax=1, minPts=2){
+  populated <- data.frame()
+  for (uid in unique(datapoints$uid)){
+    subsetone <- datapoints[datapoints$uid==uid,]
+    # subsetone <- transform(subsetone,Lag_x=lag(x,n = 1,default = 0))
+    # subsetone <- transform(subsetone,Lag_y=lag(y,n = 1,default = 0))
+    # subsetone <- transform(subsetone,Lag_t=lag(timestamp,n = 1,default = 0))
+    # subsetone$distance <- sqrt((subsetone$Lag_x-subsetone$x)^2 + (subsetone$Lag_y-subsetone$y)^2)/1000
+    # subsetone$dt <- (subsetone$timestamp - subsetone$Lag_t)/3600
+    # subsetone$speed <- subsetone$distance/subsetone$dt
+    # subsetone <- subsetone[subsetone$dt>0,]
+    # subsetone <- subsetone[subsetone$speed<130,]
+    # subsetone <-  subsetone %>% select(-c(Lag_x,Lag_y,Lag_t))
+    # subsetone <- subsetone[2:nrow(subsetone),]
+    subsetone$id <- 1:nrow(subsetone)
+    subsetone %>% filter(speed>vmax) -> validspeeds
+    validspeeds  %>% select(timestamp) ->dataframe
+    clusters <- dbscan(dataframe,eps = tmin, minPts = minPts)
+    validspeeds$tripid <- factor(clusters$cluster)
+    query <- "select subsetone.*,validspeeds.tripid from subsetone left join validspeeds on validspeeds.id = subsetone.id"
+    subsetone <- sqldf(query)
+    subsetone[is.na(subsetone)] <- 0
+    subsetone$tripid <- factor(subsetone$tripid)
+    query <- "select t.tripid,min(t.id) origin_id,max(t.id) destination_id,min(t) departure, max(t) arrival,sum(t.distance) travel_distance, max(t)-min(t) travel_time from subsetone as t where t.tripid!=0 group by t.tripid order by t.tripid"
+    trippoints <- sqldf(query)
+    query <- "select t.*,origin.x origin_x, origin.y origin_y,origin.z origin_z, dest.x dest_x, dest.y dest_y,dest.z dest_z,dest.timestamp,dest.dow from trippoints as t left join subsetone as origin on origin.id=t.origin_id left join subsetone as dest on dest.id=t.destination_id order by t.tripid"
+    trippoints <- sqldf(query)
+    trips <- trippoints %>% select(tripid,origin_x,origin_y,origin_z,departure,dest_x,dest_y, dest_z,arrival,travel_distance,travel_time,dow,timestamp)
+    colnames(trips) <- c("tripid","ox","oy","oz","departure","dx","dy","dz","arrival","tdistance","ttime","dow","timestamp")
+    trips$uid <- uid
+    populated <- rbind(populated,trips)
+  }
+  populated$id <- 1:nrow(populated)
+  return (populated)
+}
+
 whereAtTime <- function(alltrips,time=22){
     alltrips %>% filter(hour(starttime)>=time & hour(endtime)<=time) -> onroad
     alltrips %>% filter(hour(endtime)>=time & hour(endtime)+floor(stayindestination/3600)) -> ondestination
@@ -266,7 +320,7 @@ populateStayTime2 <- function(data){
         usertrips[i,]$stayindestination <-usertrips[i+1,]$departureseconds - usertrips[i,]$arrivalseconds 
       }
       else{
-        usertrips[i,]$stayindestination <- ((24*3600)-usertrips[i,]$arrivalseconds)+usertrips[i+1,]$departureseconds
+        usertrips[i,]$stayindestination <- (((24*3600)-usertrips[i,]$arrivalseconds)+usertrips[i+1,]$departureseconds)/3600
       }
     }
     newtripdata <- rbind(newtripdata,usertrips)
@@ -353,10 +407,11 @@ labelHomes3 <- function(tripdata){
   
   for (ui in users){
     usertrips <- tripdata[tripdata$uid == ui,]
+    #arrival day (last completed trip of day)
     usertrips$day <- format(ymd_hms(as_datetime(usertrips$timestamp)),'%Y-%m-%d')
     usertrips$dtrips <- 0
     usertrips$home <- "N"
-    clust <- dbscan(data.frame(x=usertrips$dx , y=usertrips$dy),eps = 20,minPts = 2)
+    clust <- dbscan(data.frame(x=usertrips$dx , y=usertrips$dy),eps = 50,minPts = 5)
     usertrips$cluster <- clust$cluster
     
     # add trips number to destination
@@ -366,9 +421,9 @@ labelHomes3 <- function(tripdata){
       usertrips[usertrips$cluster == ucluster,]$dtrips = dtrips
     }
     
-    #focus last day location
+    #focus on last day location
     if (length(unique(clust$cluster))>1 ){
-      query <- "select distinct cluster,dtrips from usertrips where cluster!=0 and tripid IN (select max(tripid) last_trip from usertrips group by day) order by dtrips desc"
+      query <- "select distinct cluster,dtrips from usertrips where arrival > 20 and cluster!=0 and tripid IN (select max(tripid) last_trip from usertrips group by day) order by dtrips desc"
       last_trip_clusters <- sqldf(query)
       home <- as.numeric(last_trip_clusters[1,]$cluster)
       usertrips$home <- ifelse(usertrips$cluster == home, "Y","N")
