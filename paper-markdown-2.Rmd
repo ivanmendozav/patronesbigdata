@@ -1,29 +1,31 @@
 ---
-title: "A Density-Based approach to identify Home location for College Communities
-  from Big Data"
+title: "Exploring Data Mining Techniques for Predicting Home Locations"
+author:
+  - Iván Mendoza^[Universidad del Azuay, imendoza@uazuay.edu.ec]
+  - Andrés Baquero^[Universidad del Azuay, obaquero@uazuay.edu.ec]
+  - Gustavo Álvarez^[Universidad del Azuay, galvarezc@uazuay.edu.ec]
 output:
   pdf_document:
     fig_caption: yes
     number_sections: yes
+    toc: yes
   word_document: default
+  html_document:
+    toc: yes
+    df_print: paged
 bibliography: mybibfile.bib
-csl: https://www.zotero.org/styles/ieee
 link-citations: yes
-indent: true
-fontsize: 10pt
 numbersections: yes
-abstract: "In the era of big data, the abundance of information presents unprecedented
-  opportunities to gain valuable insights into human behavior and activities. This
-  study focuses on harnessing the power of data collected from mobile applications
-  used by students at a local college, with the aim of identifying the location of
-  their homes. By filtering these locations, the study seeks to improve the understanding
-  of mobility patterns and the most frequent points of interest among students, to
-  obtain useful information for decision-making in mobility-related issues and transportation
-  planning in the surrounding areas. In this paper, a density-based heuristic is proposed
-  to detect home location from big data, which are collected in real-time by a mobile
-  application. The results were satisfactory and their precision seems to increase
-  as more data is acquired, which allows providing insights about potential future
-  applications.\n"
+abstract: "This study focuses on harnessing the power of data collected from mobile
+  applications used by students at a local college, with the aim of identifying the
+  location of their homes. By filtering these locations, the study seeks to improve
+  the understanding of mobility patterns and the most frequent points of interest
+  among students, to obtain useful information for decision-making in mobility-related
+  issues and transportation planning in the surrounding areas. In this paper, a density-based
+  heuristic is proposed to detect home location from big data, which are collected
+  in real-time by a mobile application. The results were satisfactory and their precision
+  seems to increase as more data is acquired, which allows providing insights about
+  potential future applications.\n"
 keywords:
 - Big data
 - data mining
@@ -144,7 +146,7 @@ The full dataset used in this study consists of spatiotemporal data, collected b
 data <- read.csv("newdatasample.csv")
 data$user <- substr(sapply(data$company_token, digest, algo="md5"),1,10)
 data$date <- lubridate::ymd_hms(data$recorded_at)
-datapoints <- changecoordsystem(data,longlabel = "longitude", latlabel = "latitude", targetproj = "+init=epsg:31992" )
+datapoints <- changecoordsystem(data,longlabel = "longitude", latlabel = "latitude", targetproj = "+proj=utm +zone=17 +south  ellps=WGS84" )
 datapoints$dow <- wday(datapoints$date)
 datapoints$timestamp <- as.numeric(datapoints$date)
 datapoints$ymd <- format(ymd_hms(datapoints$date),'%Y-%m-%d')
@@ -208,6 +210,8 @@ grid.arrange(g1,g2,ncol=2)
 
 As seen in the previous figure, most of the speeds and distances are closer to zero, probably because users spend most of their time walking or staying in one destination before starting the next trip. The changes in speed during the day can be seen in Fig \ref{fig4}.
 
+\newpage
+
 ```{r speed-hour-plot, fig.cap="\\label{fig4}Speed variations along a 24-h single day."}
 #ggplot(subsetoneday, aes(x=timestamp, y=speed))+geom_line()+ylab("Speed (km/h)")+xlab("Timestamp (s)")
 ggplot(subsetoneday, aes(x=t, y=speed))+geom_line()+ylab("Speed (km/h)")+xlab("Time of the day (hours)") + xlim(0,24)
@@ -262,8 +266,6 @@ knitr::kable(head(tripsglimpse,10),align = "c",caption = "\\label{tab4}Sample tr
 ```
 
 The resulting segmentation allows OD's to be detected. Their coordinates are given in the table as attributes "dx" and "dy" for destinations locations, and "ox" and "oy" for the origins. Fig \ref{fig6} presents on a map at scale 1:25000 the resulting user's destinations (as red spots). It can be noticed that as locations are repeatedly visited, some points could be merged into a single destination as possibly they are short displacements around the same location; this can be done by density-based clustering techniques; however this is not necessary for the upcoming analysis. By applying the algorithm to the full dataset of tracked users, segmented trajectories exhibit the statistics shown in Fig \ref{fig7}. Then, according to this report, the majority of trips occur on weekdays. Moreover, they are "short trips" below 30 minutes and 10km.  
-
-\newpage
 
 ```{r, echo=FALSE, out.width="90%", fig.cap="\\label{fig6}Sample destinations for one single user and day."}
 knitr::include_graphics("paper/images/destinos.jpeg")

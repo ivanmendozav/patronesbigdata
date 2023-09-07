@@ -1,3 +1,16 @@
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(tictoc)
+library(dbscan)
+library(rgdal)
+library(OpenStreetMap)
+library(ggplot2)
+library(gridExtra)
+library(sqldf)
+library(descriptr)
+library(digest)
+
 connect_pgsql <- function(database="bici2023"){
   require("RPostgreSQL")
   drv <- dbDriver("PostgreSQL")
@@ -236,7 +249,7 @@ addSpeeds <- function(set){
 
 
 #time-based
-segmentTrips4 <- function(datapoints, tmin=0.05, vmax=1, minPts=2){
+segmentTrips4 <- function(datapoints, tmin=600, vmax=2, minPts=2){
   populated <- data.frame()
   for (uid in unique(datapoints$uid)){
     subsetone <- datapoints[datapoints$uid==uid,]
@@ -270,6 +283,52 @@ segmentTrips4 <- function(datapoints, tmin=0.05, vmax=1, minPts=2){
   }
   populated$id <- 1:nrow(populated)
   return (populated)
+}
+
+
+#time-based
+segmentTrips5 <- function(datapoints, tmin=600, vmax=2, minPts=2){
+  populated <- data.frame()
+  for (uid in unique(datapoints$uid)){
+    subsetone <- datapoints[datapoints$uid==uid,]
+    subsetone$id <- 1:nrow(subsetone)
+    #filter
+    subsetone %>% filter(speed>vmax) -> validspeeds
+    validspeeds  %>% select(timestamp) ->dataframe
+    #cluster by time
+    clusters <- dbscan(dataframe,eps = tmin, minPts = minPts)
+    validspeeds$tripid <- factor(clusters$cluster)
+    
+    #label trip id
+    jointables <- left_join(subsetone, validspeeds, by=c('id'='id'))
+    subsetone$tripid <- factor(jointables$tripid) 
+    subsetone <- subsetone %>% tidyr::drop_na()
+    
+    #aggregate to find endpoints
+    subsetone %>%
+      group_by(tripid) %>%
+      summarise(
+        origin_id = max(id, na.rm = T),
+        destination_id = min(id, na.rm = T),
+        points = n(),
+        travel_distance = sum(distance),
+        departure = min(timestamp),
+        arrival = max(timestamp),
+        travel_time = max(timestamp)-min(timestamp)
+      ) %>%
+      arrange(tripid) -> trippoints
+    
+    #bring location and time of endpoints
+    d <- inner_join(trippoints, subsetone, by=c('origin_id'='id'))
+    d <- select(d,c(tripid.x,destination_id,points,travel_distance,departure,arrival,travel_time,uid,x,y))
+    d <- inner_join(d, subsetone, by=c('destination_id'='id'))
+    trips <- select(d,c(tripid.x,points,travel_distance,departure,arrival,travel_time,uid.x,x.x,y.x,x.y,y.y))
+    colnames(trips) <- c("tripid","points","travel_distance","departure","arrival","travel_time","uid","origin_x","origin_y","destination_x","destination_y")
+    trips$departure <- (as_datetime(trips$departure ))
+    trips$arrival <- (as_datetime(trips$arrival ))
+    populated <- rbind(populated,trips)
+  }
+  return (tail(populated,-1))
 }
 
 whereAtTime <- function(alltrips,time=22){
@@ -445,7 +504,7 @@ labelmode <- function(movingpoints){
   return(head(t,1)$Var) #sort by most frequent modes
 }
 
-changecoordsystem <- function(tripdata, longlabel="dlong", latlabel="dlat", sourceproj="+init=epsg:4326", targetproj="+init=epsg:31992"){
+changecoordsystem <- function(tripdata, longlabel="dlong", latlabel="dlat", sourceproj="+proj=longlat +datum=WGS84", targetproj="+proj=utm +zone=17 +south  ellps=WGS84"){
   library(rgdal)
   data <- tripdata
   coordinates(data) <- c(longlabel, latlabel) #columns with points

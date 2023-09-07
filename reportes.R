@@ -12,8 +12,10 @@ library(sqldf)
 source("libraries.R")
 
 tic()
-#1. Load data
-data <- getRemoteData(users=10) 
+#1. Load data 
+#972 usuarios desde Mayo 2023
+data <- getRemoteData(users=20) 
+toc()
 #data <- getData(limit=1000000,users=10) #call once
 #data <- getDataByUser(limit=1000000,userid = "imendoza") 
 #data <- getDataByRemoteUser(limit=1000000,userid = "galvarezmci",deviceid = "iPhone15-3-16-5") #call once
@@ -22,7 +24,7 @@ subdata <- data %>% filter(accuracy<1000)
 #data %>% filter(accuracy<1000 & activity_type!="unknown") %>% select(device_model,battery_level,is_moving,speed,heading,activity_type,recorded_at,latitude,longitude,company_token) ->subdata
 save(subdata,file="subdata10users.R")
 #load(file="subdata.R") #800000 datos
-write.csv(data,"10newuserspoints.csv",row.names = FALSE)
+write.csv(data,"20bestusers.csv",row.names = FALSE)
 
 
 #2. Track points stats
